@@ -251,7 +251,10 @@ def restart_script():
     """Forcefully restart the script if it hangs."""
     log("","MAIN","WATCHDOG", "No activity detected! Restarting script...")
     save_Serializable_globals()
-    os.execv(sys.executable, ['python'] + sys.argv + ['autostart'])
+    if "autostart" in sys.argv:
+        os.execv(sys.executable, ['python'] + sys.argv)
+    else:
+        os.execv(sys.executable, ['python'] + sys.argv + ['autostart'])
 # ---------------------------------------------------------------------------------------
 
 def watchdog_task():
