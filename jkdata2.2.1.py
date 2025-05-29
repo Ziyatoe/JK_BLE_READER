@@ -22,6 +22,7 @@ import sys
 import threading
 import asyncio
 from bleak import BleakClient, BleakScanner,BleakError
+from bleak.exc import BleakDBusError
 from threading import Lock
 from cursor import *
 from registers import *
@@ -35,9 +36,10 @@ import os
 import platform
 import concurrent.futures
 import itertools
+import pickle
 
 # Version
-VERSION = "2.2"
+VERSION = "2.2.1"
 
 MQTTIP ="192.168.1.11"
 MQTTPORT = 1883
@@ -56,11 +58,13 @@ WRITE_TIMEOUT = 5  # Timeout in seconds
 MQTT = True
 OUTPUT = True
 jsonStr = ""
+QUIET = True #Only print important information
 
 
 
 # BLE things
-DEVICE_NAMES = ["290120255005-01","JK_PB1A16S10P-02", "JK_PB1A16S10P-03"]
+DEVICE_NAMES = ["290120255005-01","JK_PB1A16S10P-02", "JK_PB1A16S10P-03"] #It is very important to get the names correct
+DEVICE_NAMES_LAST = [] #Keep track of which devices have been processed in the current run
 #SERVICE_UUID = "ffe0"
 SERVICE_UUID = "0000FFE0-0000-1000-8000-00805f9b34fb"
 #CHAR_UUID = "ffe1"
@@ -95,7 +99,7 @@ notification_queue = None  # Global queue for notifications
 
 def log(color=f"{RESET}",owner="0",process="", message="",**kwargs):
     #------------------------------------------------------------------------------------------
-    if OUTPUT: print(f"{color}[{owner}]{RESET}{process}: {message}",**kwargs)
+    if not QUIET: print(f"{color}[{owner}]{RESET}{process}: {message}",**kwargs)
 #------------------------------------------------------------------------------------------
 
 def calculate_crc(data):
@@ -135,7 +139,7 @@ def connectMqtt():
 
 def parse_JK_celldata(raw_data, devicename):
     #---------------------------------------------------------------------------------------------
-    global jsonStr
+    global jsonStr, DEVICE_NAMES_LAST, last_activity_time
     parsed_data = {}
 
     # Add date and time as the first two items
@@ -164,10 +168,13 @@ def parse_JK_celldata(raw_data, devicename):
     # Add alarm flags as a sub-dictionary
     # if alarm_data:
     #     parsed_data["Alarm"] = alarm_data
-
+    last_activity_time = time.time() #Update that something has happened
     jsonStr = json.dumps(parsed_data, ensure_ascii=False, indent=4)
     if OUTPUT: print(jsonStr)
-
+    if devicename not in DEVICE_NAMES_LAST: #If the processed device isnt processed then add it to the processed list.
+        DEVICE_NAMES_LAST.append(devicename)
+    if sorted(DEVICE_NAMES_LAST) == sorted(DEVICE_NAMES): #If all devices are processed then clear out the list so that it can restart
+        DEVICE_NAMES_LAST = []
     if MQTT:
         try:
             mqttClient.publish((topic_prefix + "/" + devicename), jsonStr)
@@ -234,12 +241,20 @@ def parse_device_info(device_name, data):
     
     return device_info
 # ---------------------------------------------------------------------------------------
-
+def save_Serializable_globals():
+    global DEVICE_NAMES_LAST
+    with open('serializable_globals.pkl', 'wb') as f:
+        pickle.dump(DEVICE_NAMES_LAST, f) #Save the current processed list past a script restart
+# ---------------------------------------------------------------------------------------
 def restart_script():
 # ---------------------------------------------------------------------------------------
     """Forcefully restart the script if it hangs."""
     log("","MAIN","WATCHDOG", "No activity detected! Restarting script...")
-    os.execv(sys.executable, ['python'] + sys.argv)
+    save_Serializable_globals()
+    if "autostart" in sys.argv:
+        os.execv(sys.executable, ['python'] + sys.argv)
+    else:
+        os.execv(sys.executable, ['python'] + sys.argv + ['autostart'])
 # ---------------------------------------------------------------------------------------
 
 def watchdog_task():
@@ -255,7 +270,7 @@ def watchdog_task():
 async def ble_data_process(client, data, device_name):
     #---------------------------------------------------------------------------------------------
     global indx,capturing,  stop_searching, waiting_for_device_info, waiting_for_cell_info, \
-        ble_buffer, ble_buffer_index
+        ble_buffer, ble_buffer_index, last_activity_time
     
     try:
         with thread_lock:
@@ -265,6 +280,7 @@ async def ble_data_process(client, data, device_name):
                     ble_buffer = bytearray()
                     log(GREEN, device_name ,"CALLBACK", f"Start detected! {data[:4].hex().upper()} Msg type: {data[4]:02X}")       
                     log("",device_name, "CALLBACK","frame received" , end=" ")
+                    last_activity_time = time.time() #Update that something has happened
                 else:
                     #log(device_name, f"CALLBACK: Wrong header detected! {data[:4].hex().upper()}")
                     #if OUTPUT: print(end="*",flush=True)
@@ -433,29 +449,40 @@ async def processBLE(device):
 async def scan_and_process_devices():
     #---------------------------------------------------------------------------------------------
     """Scans for BLE devices and processes them sequentially."""
-    global waiting_for_cell_info, waiting_for_device_info
+    global waiting_for_cell_info, waiting_for_device_info, DEVICE_NAMES_LAST, last_activity_time
 
+    scanner = BleakScanner() #Made the scanner a separate object in case it's needed further down in the future.
     try:
-        devices = await BleakScanner.discover()
-    except BleakError as e:
+        devices = await scanner.discover()
+    except BleakDBusError as e:
         if "InProgress" in str(e):
-            
-            log(RED,device_name, "BLE","ERROR scan already in progress. Retrying in 5s...")
-            await asyncio.sleep(5)
-            return False  
-        else:
-            log(RED,device_name, "BLE","ERROR!")
-            return False   
+            #log(RED,device_name, "BLE","ERROR scan already in progress. Retrying in 5s...")
+            log(RED,"Some device", "BLE","ERROR scan already in progress. Retrying in 5s...") #device_name isnt defined in this scope, so I changed it
 
-    found_devices = {d.name: d for d in devices if d.name in DEVICE_NAMES}
-    
-    for device_name in DEVICE_NAMES:
-        device = found_devices.get(device_name)
-        if device:
-            log(GREEN,device.name,"BLE","found!\nConnecting ", end="")
-            await processBLE(device)
+            await restart_script() #Restarting the script and thus restarting the BLE module seems to work best for resolving this.
+            return False
         else:
-            log(RED,device_name,"BLE","Not found.")
+            log(RED,"Some device", "BLE","ERROR!") #device_name isnt defined in this scope, so I changed it
+            return False
+    except BleakError:
+        await restart_script() #Restarting the script and thus restarting the BLE module seems to work best for resolving this.
+        return False
+    try:
+        
+        found_devices = {d.name: d for d in devices if d.name in DEVICE_NAMES}
+        for device_name in DEVICE_NAMES:
+            if device_name not in DEVICE_NAMES_LAST: #If its a device that hasnt been processed in the past, then proceed
+                device = found_devices.get(device_name)
+                if device:
+                    log(GREEN,device.name,"BLE","found!\nConnecting ", end="")
+                    last_activity_time = time.time()
+                    await processBLE(device)
+                else:
+                    log(RED,device_name,"BLE","Not found.")
+    except Exception as e:
+        print(e)
+        await asyncio.sleep(5)
+        return False
 
     return True
 #---------------------------------------------------------------------------------------------
@@ -481,8 +508,12 @@ async def notify_process_task():
 async def main():
 # ---------------------------------------------------------------------------------------
     global waiting_for_device_info,waiting_for_cell_info,loop,last_activity_time
-    global notification_queue
+    global notification_queue, DEVICE_NAMES_LAST
 
+    if "autostart" in sys.argv: #Check if the script has bee automatically restarted and reloads the list of processed devices. This is important to not get stuck on the same devices.
+        if os.path.exists('serializable_globals.pkl'):
+            with open('serializable_globals.pkl', 'rb') as f:
+                DEVICE_NAMES_LAST = pickle.load(f)
     waiting_for_device_info = False
     waiting_for_cell_info = False
 
@@ -527,12 +558,12 @@ async def main():
         log(LBLUE,"BLE","", "All devices processed !")
         
         s = int(SLEEP/2)
-        if OUTPUT: print(end=""+"sleep for "+str(SLEEP)+"sec ")
+        if not QUIET: print(end=""+"sleep for "+str(SLEEP)+"sec ")
         for x in range(s):
             #todo mqtt break
             #if is_onmessage: break
             if x % 2 == 0:
-                if OUTPUT: print(end="--"+str(x*2), flush=True)
+                if not QUIET: print(end="--"+str(x*2), flush=True)
             time.sleep(2)
         log("\n"+LBLUE,"BLE","", "Restarting scan..."+today+" "+ now)
         waiting_for_cell_info = False
