@@ -449,29 +449,40 @@ async def processBLE(device):
 async def scan_and_process_devices():
     #---------------------------------------------------------------------------------------------
     """Scans for BLE devices and processes them sequentially."""
-    global waiting_for_cell_info, waiting_for_device_info
+    global waiting_for_cell_info, waiting_for_device_info, DEVICE_NAMES_LAST, last_activity_time
 
+    scanner = BleakScanner() #Made the scanner a separate object in case it's needed further down in the future.
     try:
-        devices = await BleakScanner.discover()
-    except BleakError as e:
+        devices = await scanner.discover()
+    except BleakDBusError as e:
         if "InProgress" in str(e):
-            
-            log(RED,device_name, "BLE","ERROR scan already in progress. Retrying in 5s...")
-            await asyncio.sleep(5)
-            return False  
-        else:
-            log(RED,device_name, "BLE","ERROR!")
-            return False   
+            #log(RED,device_name, "BLE","ERROR scan already in progress. Retrying in 5s...")
+            log(RED,"Some device", "BLE","ERROR scan already in progress. Retrying in 5s...") #device_name isnt defined in this scope, so I changed it
 
-    found_devices = {d.name: d for d in devices if d.name in DEVICE_NAMES}
-    
-    for device_name in DEVICE_NAMES:
-        device = found_devices.get(device_name)
-        if device:
-            log(GREEN,device.name,"BLE","found!\nConnecting ", end="")
-            await processBLE(device)
+            await restart_script() #Restarting the script and thus restarting the BLE module seems to work best for resolving this.
+            return False
         else:
-            log(RED,device_name,"BLE","Not found.")
+            log(RED,"Some device", "BLE","ERROR!") #device_name isnt defined in this scope, so I changed it
+            return False
+    except BleakError:
+        await restart_script() #Restarting the script and thus restarting the BLE module seems to work best for resolving this.
+        return False
+    try:
+        
+        found_devices = {d.name: d for d in devices if d.name in DEVICE_NAMES}
+        for device_name in DEVICE_NAMES:
+            if device_name not in DEVICE_NAMES_LAST: #If its a device that hasnt been processed in the past, then proceed
+                device = found_devices.get(device_name)
+                if device:
+                    log(GREEN,device.name,"BLE","found!\nConnecting ", end="")
+                    last_activity_time = time.time()
+                    await processBLE(device)
+                else:
+                    log(RED,device_name,"BLE","Not found.")
+    except Exception as e:
+        print(e)
+        await asyncio.sleep(5)
+        return False
 
     return True
 #---------------------------------------------------------------------------------------------
