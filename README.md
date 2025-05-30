@@ -9,3 +9,10 @@ This script tested on a Pi4 wiith bluetooth.
 
 MQTT Topic is "JK/devName"
 If you tested on an other JK BMS than JK_PB1A16S10P, please let me know
+
+V2.2.1
+from NotANewNick
+    Added stability for unhandled exception in BleakScanner()
+    Added functions to make sure each device is checked
+    Added function to update the last_activity_time on real actions
+    Added persistence to the list of checked devices
